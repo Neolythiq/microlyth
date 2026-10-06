@@ -9,7 +9,7 @@ from microlyth.src.helpers import GetKeyFromRegistry
 
 class TextGenerationModel(ABC):
     @abstractmethod
-    def SendRequest(
+    def GenerateText(
         self, 
         prompt: str, 
         systemPrompt: Optional[str] = None,
@@ -112,7 +112,7 @@ class UniversalClient(TextGenerationModel, EmbeddingModel):
             api_key=self.embeddingModelApiKey,
         )
 
-    def SendRequest(self, prompt : str, 
+    def GenerateText(self, prompt : str, 
                     systemPrompt: Optional[str] =None,
                     taskType: Optional[str] = None,
                     targetTier: Optional[str] = None):
@@ -154,8 +154,7 @@ class OllamaTextGenClient(TextGenerationModel):
         
         self.client = ollama.Client(host=self.endPoint)
 
-    def SendRequest(self, 
-                    prompt : str, 
+    def GenerateText(self, prompt : str, 
                     systemPrompt: Optional[str] =None,
                     taskType: Optional[str] = None,
                     targetTier: Optional[str] = None) -> str:
