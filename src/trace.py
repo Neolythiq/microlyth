@@ -3,6 +3,8 @@ from enum import Enum
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, Union
 
+from microlyth.src.prompts import PromptPrimitives
+
 class StepType(Enum):
     THOUGHT = "thought"           # Internal reasoning / reflection
     ACTION = "action"             # Executed action item(s) / tool call(s)
@@ -239,8 +241,20 @@ class ParsedCycleTrace:
 
 
 class TraceParser:
-    def __init__(self):
+    def __init__(self,
+                 formatPrompt: str= None):
+        self.PromptFormatting = formatPrompt
+        if not self.PromptFormatting:
+            self.PromptFormatting = PromptPrimitives.DefaultCycleFormatting
+        
         self._parser_fn: Optional[Callable[[str], ParsedCycleTrace]] = None
+
+    def FormatPrompt(self) -> str:
+            """
+            Returns the mandatory output formatting rules to be injected 
+            into the SystemInstructions prompt.
+            """
+            return self.PromptFormatting
 
     def RegisterParser(self, fn: Callable[[str], ParsedCycleTrace]) -> Callable:
         """Decorator allowing users to define custom regex or AST parsing logic."""
