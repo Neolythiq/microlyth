@@ -7,7 +7,9 @@ from enum import Enum
 import json
 import re
 
-from attrs import inspect
+import inspect
+
+from microlyth.src.agents import AgentProfileBase
 
 @dataclass
 class ActionSpec:
@@ -70,15 +72,15 @@ class InstructionSet:
 
         def Decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
             # Wrap the user callback to parse payload before execution
-            async def ExecWrapper(payload: str, agentContext: Any) -> Any:
+            async def ExecWrapper(payload: str, activeAgent: AgentProfileBase, engine: Any, ctx: Any = None) -> Any:
                 try:
                     parsedPayload = defaultParser(payload)
                 except Exception as e:
                     raise ValueError(f"Failed to parse payload for {name}: {e}")
 
-                if asyncio.iscoroutinefunction(fn):
-                    return await fn(parsedPayload, agentContext)
-                return fn(parsedPayload, agentContext)
+                if inspect.iscoroutinefunction(fn):
+                    return await fn(parsedPayload, activeAgent, engine, ctx)
+                return fn(parsedPayload, activeAgent, engine, ctx)
 
             self._instructions[name] = ActionSpec(
                 name=name,
@@ -214,11 +216,11 @@ class InstructionSet:
         return actions
 
     # --- ASYNC DISPATCH ENGINE ---
-    async def DispatchBatch(self, batch: ActionBatch, agentContext: Any) -> List[Any]:
+    async def DispatchBatch(self, batch: ActionBatch, activeAgent: AgentProfileBase, engine: Any, ctx: Any = None) -> List[Any]:
         """Executes an ActionBatch according to its configured ExecMode."""
         if batch.mode == ExecMode.PARALLEL:
             tasks = [
-                self._ExecuteSingleAction(action, agentContext)
+                self._ExecuteSingleAction(action, activeAgent, engine, ctx)
                 for action in batch.actions
             ]
             return await asyncio.gather(*tasks, return_exceptions=True)
@@ -229,7 +231,7 @@ class InstructionSet:
             for action in batch.actions:
                 if pipedInput is not None:
                     action.args["piped_input"] = pipedInput
-                result = await self._ExecuteSingleAction(action, agentContext)
+                result = await self._ExecuteSingleAction(action, activeAgent, engine, ctx)
                 results.append(result)
                 pipedInput = result
 
@@ -238,19 +240,23 @@ class InstructionSet:
         else:  # ExecMode.SEQUENTIAL (Fallback)
             results = []
             for action in batch.actions:
-                result = await self._ExecuteSingleAction(action, agentContext)
+                # TODO: use logger
+                # logger.info(f"Dispatching Action: {action.actionType} with payload: {action.rawPayload}")
+                result = await self._ExecuteSingleAction(action, activeAgent, engine, ctx)
                 results.append(result)
             return results
 
-    async def _ExecuteSingleAction(self, action: ActionItem, agentContext: Any) -> Any:
+    async def _ExecuteSingleAction(self, action: ActionItem, activeAgent: AgentProfileBase, engine: Any, ctx: Any = None) -> Any:
         if action.actionType not in self._instructions:
             raise KeyError(f"Instruction '{action.actionType}' is not registered.")
 
         handler = self._instructions[action.actionType].callback
+        # TODO: use logger
+        # logger.info(f"Handler for {action.actionType}: {handler}, payload: {action.rawPayload}, activeAgent: {activeAgent}, engine: {engine}, ctx: {ctx}")
 
         if inspect.iscoroutinefunction(handler):
-            return await handler(payload=action.rawPayload, agentContext=agentContext)
-        return handler(payload=action.rawPayload, agentContext=agentContext)
+            return await handler(payload=action.rawPayload, activeAgent=activeAgent, engine=engine, ctx=ctx)
+        return handler(payload=action.rawPayload, activeAgent=activeAgent, engine=engine, ctx=ctx)
 
 PromptComponent = Union[
     str,
