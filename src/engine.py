@@ -1,15 +1,18 @@
 from dataclasses import dataclass, field
+import json
 from typing import Callable, Dict, List, Any, Optional
 
 from enum import Enum, auto
 import inspect
 import asyncio
 
-from microlyth.src.system import InstructionSet, SystemInstructions
+from microlyth.src.system import InstructionSet, SystemCmd, SystemInstructions
 from microlyth.src.trace import ParsedCycleTrace, StepType, TraceParser, ChainOfThought
-from microlyth.src.agents import AgentProfile
+from microlyth.src.agents import AgentProfile, AgentProfileBase
 
 import re
+
+from microlyth.src.prompts import PromptCmdFactory, PromptPrimitives
 
 #class EngineType(Enum):
 #    REACT = auto()
@@ -176,11 +179,12 @@ class CoreEngine:
     # --- ENGINE LIFECYCLE API ---
     def BuildSystemPrompt(self) -> str:
         """Combines system instructions and current agent manifest into a prompt."""
-        manifestSection = f"# AGENT MANIFEST ({self.activeAgent.name})\n{self.activeAgent.manifest}"
+        manifestSection = f"# AGENT MANIFEST ({self.activeAgent.name})\n{self.activeAgent.Manifest()}"
+        toolManifestSection = f"# TOOL MANIFEST\n{self.activeAgent.ToolsManifest()}"
         taskSection = f"# CURRENT TASK\n{self.currentTask}"
         renderedInstructions = self.systemInstructions.Render()
         
-        return f"{manifestSection}\n\n{taskSection}\n\n{renderedInstructions}"
+        return f"{renderedInstructions}\n\n{manifestSection}\n\n{toolManifestSection}\n\n{taskSection}"
 
     def SetActiveAgent(self, agent: AgentProfile) -> None:
         """Loads an active agent profile, task, and initializes a new ChainOfThought."""
@@ -219,10 +223,24 @@ class CoreEngine:
 
         # 2. Invoke Gateway / Model LLM
         # (Mocked gateway call returning LLM completion text)
-        rawLlmResponse = await self._InvokeModel(fullPrompt)
+        #rawLlmResponse = await self._InvokeModelAsync(fullPrompt)
+        rawLlmResponse = self._InvokeModel(fullPrompt)
 
         # 3. Parse Response Trace
         parsedTrace = self.traceParser.ParseTrace(rawLlmResponse)
+
+        print(f"""
+___________________________ Parsed Trace ___________________________
+###########################    Thought:  ###########################
+{parsedTrace.thought}
+
+########################### Action Block: ###########################
+{parsedTrace.action_block}
+ 
+########################### Control Flow: ###########################
+{parsedTrace.control_flow}
+
+___________________________ End Of Trace ___________________________""")
 
         # 4. Record Thought Step
         if parsedTrace.thought:
@@ -232,7 +250,10 @@ class CoreEngine:
         if parsedTrace.action_block:
             batches = self.instructionSet.ParseResponse(parsedTrace.action_block)
             for batch in batches:
-                results = await self.instructionSet.DispatchBatch(batch, self.activeAgent)
+                # action: ActionItem, activeAgent: AgentProfileBase, engine: CoreEngine, ctx: Any = None
+                # TODO : use logger logger.info(f"Dispatching Action Batch: {batch}")
+                results = await self.instructionSet.DispatchBatch(batch, self.activeAgent, self, ctx=None)
+                # TODO : use logger logger.info(f"Results for {batch}: {results}")
                 self.chainOfThought.AddStep(StepType.OBSERVATION, results)
 
         # 6. Process Control Flow Signals
@@ -331,7 +352,12 @@ class CoreEngine:
             f"UNHANDLED_SIGNAL: {cleanSignal}"
         )
 
-    async def _InvokeModel(self, prompt: str) -> str:
+    def _InvokeModel(self, prompt: str) -> str:
+        """Internal model call helper."""
+        if self.gateway:
+            return self.gateway.GenerateText(prompt)
+
+    async def _InvokeModelAsync(self, prompt: str) -> str:
         """Internal model call helper."""
         if self.gateway:
             return await self.gateway.GenerateText(prompt)
@@ -342,3 +368,134 @@ class CoreEngine:
         <action_or_output><action:CALL>FetchData(id=123)</action:CALL></action_or_output>
         <control_flow>[REFINE]</control_flow>
         """
+
+class EngineFactory:
+    @staticmethod
+    def ReActLoop(instructionSet: InstructionSet = None,
+                 systemInstructions: SystemInstructions = None,
+                 traceParser: TraceParser = None,
+                 gateway: Any = None,  # GenAIGateway instance
+                 defaultAgent: Optional[AgentProfile] = None,) -> "CoreEngine":
+
+        if instructionSet is None:
+            instructionSet = EngineFactory().__BuildDefaultInstructionSet()
+        if traceParser is None:
+            traceParser = EngineFactory().__BuildTraceParser()
+        if systemInstructions is None:
+            systemInstructions = EngineFactory().__BuildReActSystemInstructions(instructionSet, traceParser)
+        if gateway is None:
+            gateway = EngineFactory().__GetDefaultGateway()
+
+        return CoreEngine(
+            instructionSet=instructionSet,
+            systemInstructions=systemInstructions,
+            traceParser=traceParser,
+            gateway=gateway,
+            defaultAgent=defaultAgent
+        )
+
+    @staticmethod
+    def __BuildDefaultInstructionSet() -> InstructionSet:
+        defaultInstructions = InstructionSet()
+
+        @defaultInstructions.NewInstruction(
+            name="CALL",
+            description="Invoke a python functiontool. tool_name(arg1=val1)",
+            example="Payload MUST be valid JSON:\n<action:CALL>\n{\"tool_name\": \"my_tool\", \"arguments\": { \"arg1\": \"val1\"}}\n</action:CALL>",
+            payloadParser=json.loads
+        )
+        def ToolCallHandler(payload: str, activeAgent: AgentProfileBase, engine: CoreEngine, ctx: Any = None) -> Any:
+            # 1. Tool Execution Primitive to be parsed and executed
+            toolname = payload.get("tool_name")
+            arguments = payload.get("arguments", {})
+
+            result = None
+            if toolname not in activeAgent.tools:
+                raise ValueError(f"Tool '{toolname}' not found in active agent '{activeAgent.name}'.")
+            else:
+                toolFunction = activeAgent.tools[toolname]
+                if not callable(toolFunction):
+                    raise ValueError(f"Tool '{toolname}' is not callable.")
+                
+                # 2. Execute the tool function with provided arguments
+                result = toolFunction(**arguments)
+
+            # TODO: use logger
+            # logger.info(f"Tool call result >>>>>>> {result}")
+            
+            return result
+
+        @defaultInstructions.NewInstruction(
+            name="COMPLETE",
+            description="Mark the task as completed."
+        )
+        def CompleteHandler(payload: str, activeAgent: AgentProfileBase, engine: CoreEngine, ctx: Any = None) -> Any:
+            engine._isCompleted = True
+            return {"status": "SUCCESS", "result": payload}
+
+        @defaultInstructions.NewInstruction(
+            name="ABORT",
+            description="Stop the engine loop due to an unrecoverable issue."
+        )
+        def AbortHandler(payload: str, activeAgent: AgentProfileBase, engine: CoreEngine, ctx: Any = None) -> Any:
+            raise RuntimeError(f"Engine Loop Aborted: {payload}")
+
+        @defaultInstructions.NewInstruction(
+            name="HALT",
+            description="Halt the engine waiting for a specific event or user input."
+        )
+        def HaltHandler(payload: str, activeAgent: AgentProfileBase, engine: CoreEngine, ctx: Any = None) -> Any:
+            engine._isHalted = True
+            return {"status": "HALT", "result": payload}
+
+        return defaultInstructions
+
+    @staticmethod
+    def __BuildAdvancedInstructionSet() -> InstructionSet:
+        advancedInstructions = InstructionSet()
+        return advancedInstructions
+    
+    @staticmethod
+    def __BuildReActSystemInstructions(instructionSet: InstructionSet,
+                                       traceParser: TraceParser) -> str:
+        instructions = SystemInstructions([
+            PromptCmdFactory.PreliminaryHeader(),
+            PromptCmdFactory.TaskUnderstanding(),
+            PromptCmdFactory.ReasoningPhase(),
+            PromptCmdFactory.ActPhase(),
+            PromptCmdFactory.ObservePhase(),
+            SystemCmd(
+                title="Available Actions & Protocols",
+                content=lambda: instructionSet.BuildSystemPromptInstructions()
+            ),
+            SystemCmd(
+                title="Trace Parsing Protocols",
+                content=lambda: traceParser.FormatPrompt()
+            ),      
+        ])
+        return instructions
+
+    @staticmethod
+    def __GetDefaultGateway() -> Any:
+        return None
+
+    @staticmethod
+    def __BuildTraceParser() -> TraceParser:
+        #formatPrompt = PromptPrimitives.DefaultCycleFormatting
+        #traceParser = TraceParser(formatPrompt=formatPrompt)
+        traceParser = TraceParser()
+
+        @traceParser.RegisterParser
+        def CustomReActTraceParser(raw_response: str) -> ParsedCycleTrace:
+            # Custom regex or parsing pipeline defined by the user
+            thought_match = re.search(r"<thought>(.*?)</thought>", raw_response, re.DOTALL)
+            action_match = re.search(r"<action_or_output>(.*?)</action_or_output>", raw_response, re.DOTALL)
+            flow_match = re.search(r"<control_flow>(.*?)</control_flow>", raw_response, re.DOTALL)
+
+            return ParsedCycleTrace(
+                thought=thought_match.group(1).strip() if thought_match else None,
+                action_block=action_match.group(1).strip() if action_match else None,
+                control_flow=flow_match.group(1).strip() if flow_match else None
+            )
+
+        return traceParser
