@@ -4,7 +4,7 @@ import asyncio
 from microlyth.src.engine import EngineFactory
 from microlyth.src.agents import ProxyAgentProfile
 
-def Main():
+def ReactLoopMain():
     reactEngine = EngineFactory.ReActLoop()
 
     agent = ProxyAgentProfile(name="HomeAssistantAgent", role="Home assistant", manifest="Specialized in providing assistance.")
@@ -14,5 +14,17 @@ def Main():
     prompt = reactEngine.BuildSystemPrompt()
     print(prompt)
 
+def PlanAndExecuteLoopMain():
+    reactEngine = EngineFactory.PlanAndExecuteLoop()
+
+    agent = ProxyAgentProfile(name="HomeAssistantAgent", role="Home assistant", manifest="Specialized in providing assistance.")
+    reactEngine.SetActiveAgent(agent=agent)
+    #reactEngine.StartTask(task="Find information on Microlyth framework.")
+
+    prompt = reactEngine.BuildSystemPrompt()
+    print(prompt)
+
 if __name__ == "__main__":
-    Main()
+    ReactLoopMain()
+    print("#####################################\n\n\n#####################################")
+    PlanAndExecuteLoopMain()

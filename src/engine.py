@@ -395,43 +395,48 @@ class EngineFactory:
         )
 
     @staticmethod
+    def PlanAndExecuteLoop(instructionSet: InstructionSet = None,
+                           systemInstructions: SystemInstructions = None,
+                           traceParser: TraceParser = None,
+                           gateway: Any = None,  # GenAIGateway instance
+                           defaultAgent: Optional[AgentProfile] = None,) -> "CoreEngine":
+
+        if instructionSet is None:
+            instructionSet = EngineFactory().__BuildInstructionSetWithDelegation()
+        if traceParser is None:
+            traceParser = EngineFactory().__BuildTraceParser()
+        if systemInstructions is None:
+            systemInstructions = EngineFactory().__BuildPlanAndExecuteSystemInstructions(instructionSet, traceParser)
+        if gateway is None:
+            gateway = EngineFactory().__GetDefaultGateway()
+
+        return CoreEngine(
+            instructionSet=instructionSet,
+            systemInstructions=systemInstructions,
+            traceParser=traceParser,
+            gateway=gateway,
+            defaultAgent=defaultAgent
+        )
+
+    @staticmethod
     def __BuildDefaultInstructionSet() -> InstructionSet:
         defaultInstructions = InstructionSet()
 
         @defaultInstructions.NewInstruction(
             name="CALL",
-            description="Invoke a python functiontool. tool_name(arg1=val1)",
+            description="Invoke a python function tool",
             example="Payload MUST be valid JSON:\n<action:CALL>\n{\"tool_name\": \"my_tool\", \"arguments\": { \"arg1\": \"val1\"}}\n</action:CALL>",
             payloadParser=json.loads
         )
         def ToolCallHandler(payload: str, activeAgent: AgentProfileBase, engine: CoreEngine, ctx: Any = None) -> Any:
-            # 1. Tool Execution Primitive to be parsed and executed
-            toolname = payload.get("tool_name")
-            arguments = payload.get("arguments", {})
-
-            result = None
-            if toolname not in activeAgent.tools:
-                raise ValueError(f"Tool '{toolname}' not found in active agent '{activeAgent.name}'.")
-            else:
-                toolFunction = activeAgent.tools[toolname]
-                if not callable(toolFunction):
-                    raise ValueError(f"Tool '{toolname}' is not callable.")
-                
-                # 2. Execute the tool function with provided arguments
-                result = toolFunction(**arguments)
-
-            # TODO: use logger
-            # logger.info(f"Tool call result >>>>>>> {result}")
-            
-            return result
+            return EngineFactory.__ToolCallingCallback(payload, activeAgent, engine, ctx)
 
         @defaultInstructions.NewInstruction(
             name="COMPLETE",
             description="Mark the task as completed."
         )
         def CompleteHandler(payload: str, activeAgent: AgentProfileBase, engine: CoreEngine, ctx: Any = None) -> Any:
-            engine._isCompleted = True
-            return {"status": "SUCCESS", "result": payload}
+            return EngineFactory.__CompleteTaskCallback(payload, activeAgent, engine, ctx)
 
         @defaultInstructions.NewInstruction(
             name="ABORT",
@@ -445,14 +450,96 @@ class EngineFactory:
             description="Halt the engine waiting for a specific event or user input."
         )
         def HaltHandler(payload: str, activeAgent: AgentProfileBase, engine: CoreEngine, ctx: Any = None) -> Any:
-            engine._isHalted = True
-            return {"status": "HALT", "result": payload}
+            return EngineFactory.__HaltTaskCallback(payload, activeAgent, engine, ctx)
 
         return defaultInstructions
 
     @staticmethod
+    def __BuildInstructionSetWithDelegation() -> InstructionSet:
+        advancedInstructions = InstructionSet()
+
+        @advancedInstructions.NewInstruction(
+            name="CALL",
+            description="Invoke a python function tool",
+            example="Payload MUST be valid JSON:\n<action:CALL>\n{\"tool_name\": \"my_tool\", \"arguments\": { \"arg1\": \"val1\"}}\n</action:CALL>",
+            payloadParser=json.loads
+        )
+        def ToolCallHandler(payload: str, activeAgent: AgentProfileBase, engine: CoreEngine, ctx: Any = None) -> Any:
+            return EngineFactory.__ToolCallingCallback(payload, activeAgent, engine, ctx)
+
+        @advancedInstructions.NewInstruction(
+            name="COMPLETE",
+            description="Mark the task as completed."
+        )
+        def CompleteHandler(payload: str, activeAgent: AgentProfileBase, engine: CoreEngine, ctx: Any = None) -> Any:
+            return EngineFactory.__CompleteTaskCallback(payload, activeAgent, engine, ctx)
+
+        @advancedInstructions.NewInstruction(
+            name="ABORT",
+            description="Stop the engine loop due to an unrecoverable issue."
+        )
+        def AbortHandler(payload: str, activeAgent: AgentProfileBase, engine: CoreEngine, ctx: Any = None) -> Any:
+            raise RuntimeError(f"Engine Loop Aborted: {payload}")
+
+        @advancedInstructions.NewInstruction(
+            name="HALT",
+            description="Halt the engine waiting for a specific event or user input."
+        )
+        def HaltHandler(payload: str, activeAgent: AgentProfileBase, engine: CoreEngine, ctx: Any = None) -> Any:
+            return EngineFactory.__HaltTaskCallback(payload, activeAgent, engine, ctx)
+
+
+        @advancedInstructions.NewInstruction(
+            name="DELEGATION",
+            description="Delegate the task to another agent."
+        )
+        def DelegationHandler(payload: str, activeAgent: AgentProfileBase, engine: CoreEngine, ctx: Any = None) -> Any:
+            return EngineFactory.__DelegationCallback(payload, activeAgent, engine, ctx)
+
+        return advancedInstructions
+
+    @staticmethod
     def __BuildAdvancedInstructionSet() -> InstructionSet:
         advancedInstructions = InstructionSet()
+
+        @advancedInstructions.NewInstruction(
+            name="CALL",
+            description="Invoke a python function tool",
+            example="Payload MUST be valid JSON:\n<action:CALL>\n{\"tool_name\": \"my_tool\", \"arguments\": { \"arg1\": \"val1\"}}\n</action:CALL>",
+            payloadParser=json.loads
+        )
+        def ToolCallHandler(payload: str, activeAgent: AgentProfileBase, engine: CoreEngine, ctx: Any = None) -> Any:
+            return engine.__ToolCallingCallback(payload, activeAgent, engine, ctx)
+
+        @advancedInstructions.NewInstruction(
+            name="COMPLETE",
+            description="Mark the task as completed."
+        )
+        def CompleteHandler(payload: str, activeAgent: AgentProfileBase, engine: CoreEngine, ctx: Any = None) -> Any:
+            return engine.__CompleteTaskCallback(payload, activeAgent, engine, ctx)
+
+        @advancedInstructions.NewInstruction(
+            name="ABORT",
+            description="Stop the engine loop due to an unrecoverable issue."
+        )
+        def AbortHandler(payload: str, activeAgent: AgentProfileBase, engine: CoreEngine, ctx: Any = None) -> Any:
+            raise RuntimeError(f"Engine Loop Aborted: {payload}")
+
+        @advancedInstructions.NewInstruction(
+            name="HALT",
+            description="Halt the engine waiting for a specific event or user input."
+        )
+        def HaltHandler(payload: str, activeAgent: AgentProfileBase, engine: CoreEngine, ctx: Any = None) -> Any:
+            return engine.__HaltTaskCallback(payload, activeAgent, engine, ctx)
+
+
+        @advancedInstructions.NewInstruction(
+            name="DELEGATION",
+            description="Delegate the task to another agent."
+        )
+        def DelegationHandler(payload: str, activeAgent: AgentProfileBase, engine: CoreEngine, ctx: Any = None) -> Any:
+            return engine.__DelegationCallback(payload, activeAgent, engine, ctx)
+
         return advancedInstructions
     
     @staticmethod
@@ -463,6 +550,26 @@ class EngineFactory:
             PromptCmdFactory.TaskUnderstanding(),
             PromptCmdFactory.ReasoningPhase(),
             PromptCmdFactory.ActPhase(),
+            PromptCmdFactory.ObservePhase(),
+            SystemCmd(
+                title="Available Actions & Protocols",
+                content=lambda: instructionSet.BuildSystemPromptInstructions()
+            ),
+            SystemCmd(
+                title="Trace Parsing Protocols",
+                content=lambda: traceParser.FormatPrompt()
+            ),      
+        ])
+        return instructions
+
+    @staticmethod
+    def __BuildPlanAndExecuteSystemInstructions(instructionSet: InstructionSet,
+                                                traceParser: TraceParser) -> str:
+        instructions = SystemInstructions([
+            PromptCmdFactory.PreliminaryHeader(),
+            PromptCmdFactory.TaskUnderstandingWithPlanning(),
+            PromptCmdFactory.ReasoningAndPanningPhase(),
+            PromptCmdFactory.ActionOrDelegationPhase(),
             PromptCmdFactory.ObservePhase(),
             SystemCmd(
                 title="Available Actions & Protocols",
@@ -499,3 +606,51 @@ class EngineFactory:
             )
 
         return traceParser
+
+    @staticmethod
+    def __ToolCallingCallback(payload: str, activeAgent: AgentProfileBase, engine: CoreEngine, ctx: Any = None) -> Any:
+        # 1. Tool Execution Primitive to be parsed and executed
+        toolname = payload.get("tool_name")
+        arguments = payload.get("arguments", {})
+
+        result = None
+        if toolname not in activeAgent.tools:
+            raise ValueError(f"Tool '{toolname}' not found in active agent '{activeAgent.name}'.")
+        else:
+            toolFunction = activeAgent.tools[toolname]
+            if not callable(toolFunction):
+                raise ValueError(f"Tool '{toolname}' is not callable.")
+            
+            # 2. Execute the tool function with provided arguments
+            result = toolFunction(**arguments)
+        return result
+
+    @staticmethod
+    def __CompleteTaskCallback(payload: str, activeAgent: AgentProfileBase, engine: CoreEngine, ctx: Any = None) -> Any:
+        engine._isCompleted = True
+        return {"status": "SUCCESS", "result": payload}
+
+    @staticmethod
+    def __HaltTaskCallback(payload: str, activeAgent: AgentProfileBase, engine) -> Any:
+        engine._isHalted = True
+        return {"status": "HALT", "result": payload}
+
+    @staticmethod
+    def __DelegationCallback(payload: str, activeAgent: AgentProfileBase, engine: CoreEngine, ctx: Any = None) -> Any:
+        # 1. Extract delegation details from payload
+        sub_agent_name = payload.get("sub_agent_name")
+        sub_task = payload.get("sub_task")
+
+        if not sub_agent_name or not sub_task:
+            raise ValueError("Delegation payload must include 'sub_agent_name' and 'sub_task'.")
+
+        # 2. Retrieve the sub-agent profile
+        if sub_agent_name not in engine.activeAgent.sub_agents:
+            raise ValueError(f"Sub-agent '{sub_agent_name}' not found in active agent '{engine.activeAgent.name}'.")
+
+        sub_agent_profile = engine.activeAgent.sub_agents[sub_agent_name]
+
+        # 3. Start the delegated task with the sub-agent
+        engine.StartTask(sub_task, agent=sub_agent_profile)
+
+        return {"status": "DELEGATED", "sub_agent": sub_agent_name, "sub_task": sub_task}
